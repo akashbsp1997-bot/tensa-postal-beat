@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 
 // ─── IndexedDB Layer ────────────────────────────────────────────────────────
 const DB_NAME = "tensa-postal-beat";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const AREAS = [
   "Block A","Block B","Block C","Block D",
   "Jagannath Mandir Area","Sarala Temple Area","Post Office Backside Area",
@@ -12,6 +12,32 @@ const AREAS = [
   "SAIL & CRP Office Area","Jindal Plant Area","Geetarani Mines Area",
   "Panchayat Office Area","Parking Area","Police Station Basti Area"
 ];
+
+// Tensa approximate center coords for each area (lat, lng)
+const AREA_DEFAULT_COORDS = {
+  "Block A": [22.0150, 85.1950],
+  "Block B": [22.0160, 85.1970],
+  "Block C": [22.0140, 85.1930],
+  "Block D": [22.0130, 85.1960],
+  "Jagannath Mandir Area": [22.0170, 85.1980],
+  "Sarala Temple Area": [22.0180, 85.1940],
+  "Post Office Backside Area": [22.0145, 85.1955],
+  "GEL Church Area": [22.0165, 85.1935],
+  "Dhobitanki Area": [22.0155, 85.1945],
+  "BSNL Tower Area": [22.0175, 85.1965],
+  "Government Medical Area": [22.0135, 85.1975],
+  "Prospecting Camp Area": [22.0125, 85.1985],
+  "Bahamba Area": [22.0115, 85.1925],
+  "Tantra Area": [22.0105, 85.1915],
+  "Zero Point Area": [22.0195, 85.1905],
+  "CRPF Camp Quarters Area": [22.0185, 85.1895],
+  "SAIL & CRP Office Area": [22.0200, 85.1885],
+  "Jindal Plant Area": [22.0095, 85.2010],
+  "Geetarani Mines Area": [22.0085, 85.2020],
+  "Panchayat Office Area": [22.0210, 85.1875],
+  "Parking Area": [22.0220, 85.1865],
+  "Police Station Basti Area": [22.0230, 85.1855],
+};
 
 let _db = null;
 async function getDB() {
@@ -33,10 +59,12 @@ async function getDB() {
         const s = db.createObjectStore("followups", { keyPath: "id" });
         s.createIndex("by-date", "followUpDate");
       }
+      if (!db.objectStoreNames.contains("areacoords")) {
+        db.createObjectStore("areacoords", { keyPath: "areaId" });
+      }
     };
     req.onsuccess = async (e) => {
       _db = e.target.result;
-      // Seed areas if empty
       const tx = _db.transaction("areas", "readwrite");
       const store = tx.objectStore("areas");
       const count = await new Promise(r => { const c = store.count(); c.onsuccess = () => r(c.result); });
@@ -99,11 +127,9 @@ async function dbImport(json) {
   return new Promise((res,rej) => { tx.oncomplete = res; tx.onerror = rej; });
 }
 
-// ─── Color helpers ──────────────────────────────────────────────────────────
 const COLOR_MAP = { green:"#22c55e", yellow:"#eab308", red:"#ef4444", blue:"#3b82f6", purple:"#a855f7" };
 const STATUS_COLOR = { existing:"#22c55e", prospect:"#f59e0b", new:"#3b82f6", closed:"#6b7280" };
 
-// ─── Toast ──────────────────────────────────────────────────────────────────
 function useToast() {
   const [toasts, setToasts] = useState([]);
   const toast = useCallback((msg, type="info") => {
@@ -112,6 +138,131 @@ function useToast() {
     setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), 3000);
   }, []);
   return { toasts, toast };
+}
+
+// ─── Leaflet Map Component ────────────────────────────────────────────────────
+function LeafletMap({ areas, houses, onAreaClick, onHouseClick, focusAreaId, theme }) {
+  const mapRef = useRef(null);
+  const mapInstanceRef = useRef(null);
+  const markersRef = useRef([]);
+  const popupRef = useRef(null);
+
+  useEffect(() => {
+    if (mapInstanceRef.current) return;
+    // Load Leaflet CSS
+    if (!document.getElementById("leaflet-css")) {
+      const link = document.createElement("link");
+      link.id = "leaflet-css";
+      link.rel = "stylesheet";
+      link.href = "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css";
+      document.head.appendChild(link);
+    }
+    // Load Leaflet JS
+    if (!window.L) {
+      const script = document.createElement("script");
+      script.src = "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js";
+      script.onload = () => initMap();
+      document.head.appendChild(script);
+    } else {
+      initMap();
+    }
+  }, []);
+
+  function initMap() {
+    if (!mapRef.current || mapInstanceRef.current) return;
+    const L = window.L;
+    const map = L.map(mapRef.current, { zoomControl: true, attributionControl: false }).setView([22.015, 85.196], 14);
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19,
+      attribution: "© OpenStreetMap"
+    }).addTo(map);
+    L.control.attribution({ prefix: "© OpenStreetMap" }).addTo(map);
+    mapInstanceRef.current = map;
+    renderMarkers();
+  }
+
+  useEffect(() => {
+    if (window.L && mapInstanceRef.current) renderMarkers();
+  }, [areas, houses, focusAreaId]);
+
+  function renderMarkers() {
+    const L = window.L;
+    const map = mapInstanceRef.current;
+    if (!L || !map) return;
+
+    // Clear old markers
+    markersRef.current.forEach(m => map.removeLayer(m));
+    markersRef.current = [];
+
+    if (focusAreaId) {
+      // Show house markers for this area
+      const areaHouses = houses.filter(h => h.areaId === focusAreaId && h.gpsLat && h.gpsLng);
+      const area = areas.find(a => a.id === focusAreaId);
+
+      if (areaHouses.length > 0) {
+        const bounds = [];
+        areaHouses.forEach(h => {
+          const color = COLOR_MAP[h.colorMarker] || "#3b82f6";
+          const icon = L.divIcon({
+            html: `<div style="width:28px;height:28px;border-radius:50% 50% 50% 0;background:${color};border:2px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,.4);transform:rotate(-45deg)"></div>`,
+            iconSize: [28,28], iconAnchor: [14,28], className:""
+          });
+          const marker = L.marker([h.gpsLat, h.gpsLng], { icon });
+          marker.on("click", () => onHouseClick && onHouseClick(h));
+          marker.bindPopup(`
+            <div style="min-width:180px;font-family:system-ui;padding:4px 0">
+              <div style="font-weight:800;font-size:14px;margin-bottom:4px">${h.ownerName || "Unknown"}</div>
+              <div style="font-size:12px;color:#64748b;margin-bottom:6px">House ${h.houseNumber || ""}</div>
+              <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px">
+                <span style="background:${STATUS_COLOR[h.customerStatus] || "#888"}22;color:${STATUS_COLOR[h.customerStatus] || "#888"};padding:2px 8px;border-radius:5px;font-size:11px;font-weight:700;text-transform:capitalize">${h.customerStatus}</span>
+              </div>
+              ${h.mobileNumber ? `<a href="tel:${h.mobileNumber}" style="display:block;background:#4f6ef7;color:#fff;text-align:center;padding:7px;border-radius:8px;text-decoration:none;font-weight:700;font-size:13px">📞 ${h.mobileNumber}</a>` : ""}
+            </div>
+          `, { maxWidth: 220 });
+          marker.addTo(map);
+          markersRef.current.push(marker);
+          bounds.push([h.gpsLat, h.gpsLng]);
+        });
+        if (bounds.length > 0) map.fitBounds(bounds, { padding: [40, 40] });
+      } else {
+        // No GPS houses — show area default position
+        const defaults = area ? AREA_DEFAULT_COORDS[area.name] : null;
+        if (defaults) map.setView(defaults, 16);
+        const icon = L.divIcon({
+          html: `<div style="background:#f97316;color:#fff;padding:6px 12px;border-radius:20px;font-weight:700;font-size:12px;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,.3)">📍 ${area?.name || "Area"}<br><span style="font-size:10px;font-weight:400">No GPS data yet</span></div>`,
+          className: "", iconAnchor: [0, 0]
+        });
+        const m = L.marker(defaults || [22.015, 85.196], { icon }).addTo(map);
+        markersRef.current.push(m);
+      }
+    } else {
+      // Show area cluster markers
+      areas.forEach(area => {
+        const areaHouses = houses.filter(h => h.areaId === area.id);
+        const gpsHouses = areaHouses.filter(h => h.gpsLat && h.gpsLng);
+        let lat, lng;
+        if (gpsHouses.length > 0) {
+          lat = gpsHouses.reduce((s, h) => s + h.gpsLat, 0) / gpsHouses.length;
+          lng = gpsHouses.reduce((s, h) => s + h.gpsLng, 0) / gpsHouses.length;
+        } else {
+          const defaults = AREA_DEFAULT_COORDS[area.name];
+          if (!defaults) return;
+          [lat, lng] = defaults;
+        }
+        const count = areaHouses.length;
+        const icon = L.divIcon({
+          html: `<div style="background:#4f6ef7;color:#fff;border-radius:20px;padding:6px 10px;font-weight:800;font-size:12px;box-shadow:0 2px 8px rgba(0,0,0,.35);white-space:nowrap;border:2px solid #fff">${area.name.replace(" Area","")}<br><span style="font-size:10px;font-weight:400;opacity:.85">${count} ${count===1?"house":"houses"}</span></div>`,
+          className: "", iconAnchor: [0, 0]
+        });
+        const marker = L.marker([lat, lng], { icon });
+        marker.on("click", () => onAreaClick && onAreaClick(area));
+        marker.addTo(map);
+        markersRef.current.push(marker);
+      });
+    }
+  }
+
+  return <div ref={mapRef} style={{ width:"100%", height:"100%", background:"#e8f0fe" }} />;
 }
 
 // ─── Main App ────────────────────────────────────────────────────────────────
@@ -139,6 +290,7 @@ export default function App() {
 
   const pages = {
     dashboard: <Dashboard nav={nav} theme={theme} refresh={refresh} toast={toast} />,
+    map: <MapPage nav={nav} theme={theme} refresh={refresh} />,
     add: <AddEntry nav={nav} theme={theme} params={pageParams} toast={toast} bump={bump} />,
     areas: <AreasPage nav={nav} theme={theme} refresh={refresh} />,
     search: <SearchPage nav={nav} theme={theme} refresh={refresh} />,
@@ -151,19 +303,20 @@ export default function App() {
 
   const navItems = [
     { id:"dashboard", icon:"🏠", label:"Home" },
+    { id:"map", icon:"🗺️", label:"Map" },
     { id:"add", icon:"➕", label:"Add" },
-    { id:"areas", icon:"📍", label:"Areas" },
     { id:"search", icon:"🔍", label:"Search" },
     { id:"reports", icon:"📊", label:"Reports" },
   ];
 
+  const fullscreen = ["add","house-detail","biz-detail","followups","settings","map"].includes(page);
+
   return (
     <div style={{ background: theme.bg, color: theme.text, minHeight:"100vh", fontFamily:"system-ui,-apple-system,sans-serif", maxWidth:480, margin:"0 auto", position:"relative", display:"flex", flexDirection:"column" }}>
-      <div style={{ flex:1, overflowY:"auto", paddingBottom:72 }}>
+      <div style={{ flex:1, overflowY: page==="map" ? "hidden" : "auto", paddingBottom: fullscreen ? 0 : 72, height: page==="map" ? "100vh" : "auto" }}>
         {pages[page] || pages.dashboard}
       </div>
 
-      {/* Bottom Nav */}
       {!["add","house-detail","biz-detail","followups","settings"].includes(page) && (
         <nav style={{ position:"fixed", bottom:0, left:"50%", transform:"translateX(-50%)", width:"100%", maxWidth:480, background: theme.card, borderTop:`1px solid ${theme.border}`, display:"flex", zIndex:100 }}>
           {navItems.map(item => (
@@ -175,7 +328,6 @@ export default function App() {
         </nav>
       )}
 
-      {/* Toasts */}
       <div style={{ position:"fixed", top:12, left:"50%", transform:"translateX(-50%)", zIndex:999, display:"flex", flexDirection:"column", gap:8, width:"90%", maxWidth:420, pointerEvents:"none" }}>
         {toasts.map(t => (
           <div key={t.id} style={{ background: t.type==="error"? theme.danger : theme.primary, color:"#fff", padding:"10px 16px", borderRadius:10, fontSize:13, fontWeight:600, boxShadow:"0 4px 16px rgba(0,0,0,.2)", animation:"slideIn .2s ease" }}>
@@ -183,7 +335,85 @@ export default function App() {
           </div>
         ))}
       </div>
-      <style>{`@keyframes slideIn{from{transform:translateY(-8px);opacity:0}to{transform:translateY(0);opacity:1}}`}</style>
+      <style>{`@keyframes slideIn{from{transform:translateY(-8px);opacity:0}to{transform:translateY(0);opacity:1}} .leaflet-popup-content-wrapper{border-radius:12px!important;box-shadow:0 4px 20px rgba(0,0,0,.15)!important} .leaflet-popup-tip{display:none}`}</style>
+    </div>
+  );
+}
+
+// ─── Map Page ────────────────────────────────────────────────────────────────
+function MapPage({ nav, theme, refresh }) {
+  const [areas, setAreas] = useState([]);
+  const [houses, setHouses] = useState([]);
+  const [focusArea, setFocusArea] = useState(null);
+
+  useEffect(() => {
+    Promise.all([dbGetAll("areas"), dbGetAll("houses")])
+      .then(([a, h]) => { setAreas(a); setHouses(h); });
+  }, [refresh]);
+
+  const handleAreaClick = (area) => setFocusArea(area);
+  const handleHouseClick = (house) => nav("house-detail", { id: house.id });
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", height:"100vh" }}>
+      {/* Header */}
+      <div style={{ background: theme.card, borderBottom:`1px solid ${theme.border}`, padding:"12px 16px", display:"flex", alignItems:"center", gap:10, flexShrink:0, zIndex:10 }}>
+        {focusArea ? (
+          <>
+            <button onClick={() => setFocusArea(null)} style={{ background:"none", border:"none", cursor:"pointer", fontSize:22 }}>←</button>
+            <div style={{ flex:1 }}>
+              <div style={{ fontWeight:800, fontSize:15, color:theme.text }}>{focusArea.name}</div>
+              <div style={{ fontSize:11, color:theme.muted }}>{houses.filter(h=>h.areaId===focusArea.id).length} houses • tap pin for details</div>
+            </div>
+            <button onClick={() => nav("add", { type:"house" })} style={{ background:theme.primary, color:"#fff", border:"none", borderRadius:8, padding:"6px 12px", fontSize:12, fontWeight:700, cursor:"pointer" }}>+ Add House</button>
+          </>
+        ) : (
+          <>
+            <div style={{ fontSize:20 }}>🗺️</div>
+            <div style={{ flex:1 }}>
+              <div style={{ fontWeight:800, fontSize:15, color:theme.text }}>Beat Map</div>
+              <div style={{ fontSize:11, color:theme.muted }}>Tap an area to see houses</div>
+            </div>
+            <div style={{ fontSize:11, color:theme.muted, background:theme.bg, padding:"4px 8px", borderRadius:6 }}>OSM</div>
+          </>
+        )}
+      </div>
+
+      {/* Legend */}
+      {focusArea && (
+        <div style={{ background:theme.card, borderBottom:`1px solid ${theme.border}`, padding:"8px 16px", display:"flex", gap:12, flexShrink:0, overflowX:"auto" }}>
+          {Object.entries(COLOR_MAP).map(([name, hex]) => (
+            <div key={name} style={{ display:"flex", alignItems:"center", gap:4, whiteSpace:"nowrap" }}>
+              <div style={{ width:10, height:10, borderRadius:"50%", background:hex }} />
+              <span style={{ fontSize:10, color:theme.muted, textTransform:"capitalize" }}>{name}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Map */}
+      <div style={{ flex:1, position:"relative" }}>
+        <LeafletMap
+          areas={areas}
+          houses={houses}
+          focusAreaId={focusArea?.id || null}
+          onAreaClick={handleAreaClick}
+          onHouseClick={handleHouseClick}
+          theme={theme}
+        />
+
+        {/* No GPS hint */}
+        {focusArea && houses.filter(h=>h.areaId===focusArea.id && h.gpsLat).length === 0 && (
+          <div style={{ position:"absolute", bottom:80, left:"50%", transform:"translateX(-50%)", background: theme.card, border:`1px solid ${theme.border}`, borderRadius:12, padding:"12px 16px", zIndex:500, textAlign:"center", boxShadow:"0 4px 16px rgba(0,0,0,.15)", width:"80%", maxWidth:280 }}>
+            <div style={{ fontSize:20, marginBottom:4 }}>📍</div>
+            <div style={{ fontSize:13, fontWeight:700, color:theme.text, marginBottom:2 }}>No GPS data yet</div>
+            <div style={{ fontSize:11, color:theme.muted }}>Add houses with GPS to see them on the map</div>
+          </div>
+        )}
+      </div>
+
+      {/* Bottom Nav spacer */}
+      <div style={{ height:64, flexShrink:0, background:theme.card }} />
     </div>
   );
 }
@@ -215,7 +445,6 @@ function Dashboard({ nav, theme, refresh, toast }) {
 
   return (
     <div style={{ padding:"16px 16px 8px" }}>
-      {/* Header */}
       <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:20 }}>
         <div>
           <div style={{ fontSize:24, fontWeight:800, color:theme.primary, letterSpacing:-0.5 }}>🏮 Tensa Beat</div>
@@ -224,18 +453,16 @@ function Dashboard({ nav, theme, refresh, toast }) {
         <button onClick={() => nav("settings")} style={{ background:theme.card, border:`1px solid ${theme.border}`, borderRadius:10, width:40, height:40, cursor:"pointer", fontSize:18, display:"flex", alignItems:"center", justifyContent:"center" }}>⚙️</button>
       </div>
 
-      {/* Quick Actions */}
       <div style={{ marginBottom:20 }}>
         <SectionLabel theme={theme}>Quick Actions</SectionLabel>
         <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
           <QuickBtn theme={theme} color={theme.primary} icon="🏠" label="Add House" onClick={() => nav("add", { type:"house" })} />
           <QuickBtn theme={theme} color={theme.accent} icon="🏪" label="Add Business" onClick={() => nav("add", { type:"business" })} />
           <QuickBtn theme={theme} color="#8b5cf6" icon="📅" label="Follow-ups" onClick={() => nav("followups")} outline />
-          <QuickBtn theme={theme} color="#10b981" icon="🔍" label="Search" onClick={() => nav("search")} outline />
+          <QuickBtn theme={theme} color="#10b981" icon="🗺️" label="Beat Map" onClick={() => nav("map")} outline />
         </div>
       </div>
 
-      {/* Stats */}
       <div style={{ marginBottom:20 }}>
         <SectionLabel theme={theme}>Overview</SectionLabel>
         <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
@@ -249,7 +476,6 @@ function Dashboard({ nav, theme, refresh, toast }) {
         </div>
       </div>
 
-      {/* Recent */}
       <div style={{ marginBottom:8 }}>
         <SectionLabel theme={theme}>Recent Entries</SectionLabel>
         <div style={{ background:theme.card, borderRadius:12, border:`1px solid ${theme.border}`, overflow:"hidden" }}>
@@ -299,13 +525,8 @@ function AddEntry({ nav, theme, params, toast, bump }) {
   useEffect(() => {
     dbGetAll("areas").then(setAreas);
     if (editId) {
-      if (editType === "house") {
-        dbGet("houses", editId).then(h => h && setHouseForm(h));
-        setTab("house");
-      } else {
-        dbGet("businesses", editId).then(b => b && setBizForm({ ...b, followUpDate: b.followUpDate || "" }));
-        setTab("business");
-      }
+      if (editType === "house") { dbGet("houses", editId).then(h => h && setHouseForm(h)); setTab("house"); }
+      else { dbGet("businesses", editId).then(b => b && setBizForm({ ...b, followUpDate: b.followUpDate || "" })); setTab("business"); }
     }
   }, [editId, editType]);
 
@@ -323,8 +544,7 @@ function AddEntry({ nav, theme, params, toast, bump }) {
   };
 
   const handlePhoto = (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+    const file = e.target.files?.[0]; if (!file) return;
     const reader = new FileReader();
     reader.onloadend = () => { setHouseForm(f=>({...f, photoUrl:reader.result})); toast("Photo captured!"); };
     reader.readAsDataURL(file);
@@ -338,8 +558,7 @@ function AddEntry({ nav, theme, params, toast, bump }) {
     const now = new Date().toISOString();
     try {
       await dbPut("houses", { ...houseForm, id: editId || crypto.randomUUID(), createdAt: houseForm.createdAt || now, updatedAt: now });
-      toast(editId ? "House updated!" : "House added!");
-      bump();
+      toast(editId ? "House updated!" : "House added!"); bump();
       nav(editId ? "house-detail" : "dashboard", editId ? { id: editId } : {});
     } catch { toast("Error saving","error"); }
     setSaving(false);
@@ -357,8 +576,7 @@ function AddEntry({ nav, theme, params, toast, bump }) {
       if (bizForm.followUpDate) {
         await dbPut("followups", { id: crypto.randomUUID(), entityType:"business", entityId:id, entityName:bizForm.businessName, followUpDate:bizForm.followUpDate, notes:bizForm.remarks||"", completed:false, createdAt:now });
       }
-      toast(editId ? "Business updated!" : "Business added!");
-      bump();
+      toast(editId ? "Business updated!" : "Business added!"); bump();
       nav(editId ? "biz-detail" : "dashboard", editId ? { id: editId } : {});
     } catch { toast("Error saving","error"); }
     setSaving(false);
@@ -394,8 +612,6 @@ function AddEntry({ nav, theme, params, toast, bump }) {
               <FormInput label="Alt Mobile" value={houseForm.alternateNumber} onChange={hf("alternateNumber")} theme={theme} type="tel" />
             </div>
             <FormInput label="Family Size" value={houseForm.familySize} onChange={e=>setHouseForm(f=>({...f,familySize:+e.target.value||1}))} theme={theme} type="number" min={1} />
-
-            {/* Status */}
             <div style={{ background:theme.card, border:`1px solid ${theme.border}`, borderRadius:12, padding:14 }}>
               <div style={{ fontSize:12, fontWeight:600, color:theme.muted, marginBottom:10 }}>CUSTOMER STATUS</div>
               <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
@@ -406,8 +622,6 @@ function AddEntry({ nav, theme, params, toast, bump }) {
                 ))}
               </div>
             </div>
-
-            {/* Color Marker */}
             <div style={{ background:theme.card, border:`1px solid ${theme.border}`, borderRadius:12, padding:14 }}>
               <div style={{ fontSize:12, fontWeight:600, color:theme.muted, marginBottom:10 }}>MAP MARKER COLOR</div>
               <div style={{ display:"flex", gap:12 }}>
@@ -416,8 +630,6 @@ function AddEntry({ nav, theme, params, toast, bump }) {
                 ))}
               </div>
             </div>
-
-            {/* GPS + Photo */}
             <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
               <button onClick={captureGPS} style={{ padding:"16px 8px", borderRadius:12, border:`1px solid ${houseForm.gpsLat?theme.success:theme.border}`, background:theme.card, color:houseForm.gpsLat?theme.success:theme.muted, cursor:"pointer", display:"flex", flexDirection:"column", alignItems:"center", gap:4, fontSize:12, fontWeight:600 }}>
                 {gpsLoading ? <span style={{ fontSize:20 }}>⏳</span> : <span style={{ fontSize:20 }}>📍</span>}
@@ -429,10 +641,8 @@ function AddEntry({ nav, theme, params, toast, bump }) {
                 <input type="file" accept="image/*" capture="environment" style={{ display:"none" }} onChange={handlePhoto} />
               </label>
             </div>
-
             <FormTextarea label="Address Notes" value={houseForm.addressNotes} onChange={hf("addressNotes")} theme={theme} />
             <FormTextarea label="Delivery Notes" value={houseForm.deliveryNotes} onChange={hf("deliveryNotes")} theme={theme} />
-
             <SaveBtn label="Save House" color={theme.primary} onClick={saveHouse} saving={saving} />
           </div>
         )}
@@ -445,8 +655,6 @@ function AddEntry({ nav, theme, params, toast, bump }) {
             <FormInput label="Mobile Number" value={bizForm.mobileNumber} onChange={bf("mobileNumber")} theme={theme} type="tel" />
             <FormSelect label="Business Type" value={bizForm.businessType} onChange={bf("businessType")} theme={theme}
               options={["shop","contractor","mining","transport","office","school","medical","other"].map(t=>({value:t,label:t.charAt(0).toUpperCase()+t.slice(1)}))} />
-
-            {/* Services */}
             <div style={{ background:theme.card, border:`1px solid ${theme.border}`, borderRadius:12, padding:14 }}>
               <div style={{ fontSize:12, fontWeight:600, color:theme.muted, marginBottom:10 }}>INTERESTED SERVICES</div>
               {services.map(s => (
@@ -456,7 +664,6 @@ function AddEntry({ nav, theme, params, toast, bump }) {
                 </label>
               ))}
             </div>
-
             <FormInput label="Follow-up Date" value={bizForm.followUpDate} onChange={bf("followUpDate")} theme={theme} type="date" />
             <FormTextarea label="Remarks / Notes" value={bizForm.remarks} onChange={bf("remarks")} theme={theme} />
             <SaveBtn label="Save Business" color={theme.accent} onClick={saveBiz} saving={saving} />
@@ -485,9 +692,7 @@ function AreasPage({ nav, theme, refresh }) {
     <div style={{ padding:"16px" }}>
       <div style={{ fontSize:22, fontWeight:800, color:theme.primary, marginBottom:4 }}>Beat Areas</div>
       <div style={{ fontSize:12, color:theme.muted, marginBottom:16 }}>Manage your delivery zones</div>
-
       <SearchBar value={search} onChange={e=>setSearch(e.target.value)} theme={theme} placeholder="Search areas..." />
-
       <div style={{ display:"flex", flexDirection:"column", gap:10, marginTop:14 }}>
         {filtered.map(area => {
           const hCount = houses.filter(h=>h.areaId===area.id).length;
@@ -608,18 +813,10 @@ function ReportsPage({ nav, theme, refresh, toast }) {
           <div style={{ fontSize:22, fontWeight:800, color:theme.primary, marginBottom:4 }}>Reports</div>
           <div style={{ fontSize:12, color:theme.muted }}>Area & business statistics</div>
         </div>
-        <button onClick={exportCSV} style={{ background:theme.card, border:`1px solid ${theme.border}`, padding:"8px 14px", borderRadius:10, fontSize:13, fontWeight:700, color:theme.primary, cursor:"pointer", display:"flex", alignItems:"center", gap:6 }}>
-          ⬇ CSV
-        </button>
+        <button onClick={exportCSV} style={{ background:theme.card, border:`1px solid ${theme.border}`, padding:"8px 14px", borderRadius:10, fontSize:13, fontWeight:700, color:theme.primary, cursor:"pointer" }}>⬇ CSV</button>
       </div>
-
-      {/* Summary Cards */}
       <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:8, marginBottom:16 }}>
-        {[
-          { label:"Houses", value:houses.length, icon:"🏠" },
-          { label:"Businesses", value:businesses.length, icon:"🏪" },
-          { label:"Prospects", value:houses.filter(h=>h.customerStatus==="prospect").length, icon:"🎯" },
-        ].map(s => (
+        {[{ label:"Houses", value:houses.length, icon:"🏠" },{ label:"Businesses", value:businesses.length, icon:"🏪" },{ label:"Prospects", value:houses.filter(h=>h.customerStatus==="prospect").length, icon:"🎯" }].map(s => (
           <div key={s.label} style={{ background:theme.card, borderRadius:12, padding:"12px 10px", border:`1px solid ${theme.border}`, textAlign:"center" }}>
             <div style={{ fontSize:22 }}>{s.icon}</div>
             <div style={{ fontSize:20, fontWeight:800, color:theme.text }}>{s.value}</div>
@@ -627,8 +824,6 @@ function ReportsPage({ nav, theme, refresh, toast }) {
           </div>
         ))}
       </div>
-
-      {/* Status breakdown */}
       <div style={{ background:theme.card, borderRadius:12, border:`1px solid ${theme.border}`, marginBottom:14, overflow:"hidden" }}>
         <div style={{ padding:"12px 14px", borderBottom:`1px solid ${theme.border}`, fontWeight:700, fontSize:13 }}>📊 Status Breakdown</div>
         {["existing","prospect","new","closed"].map(s => {
@@ -644,16 +839,9 @@ function ReportsPage({ nav, theme, refresh, toast }) {
           );
         })}
       </div>
-
-      {/* Area report */}
       {activeAreas.length > 0 && (
         <div style={{ background:theme.card, borderRadius:12, border:`1px solid ${theme.border}`, overflow:"hidden" }}>
           <div style={{ padding:"12px 14px", borderBottom:`1px solid ${theme.border}`, fontWeight:700, fontSize:13 }}>🗺️ Area-wise Report</div>
-          <div style={{ display:"grid", gridTemplateColumns:"1fr auto auto", padding:"8px 14px", borderBottom:`1px solid ${theme.border}` }}>
-            <span style={{ fontSize:11, fontWeight:700, color:theme.muted }}>AREA</span>
-            <span style={{ fontSize:11, fontWeight:700, color:theme.muted, textAlign:"right", minWidth:30 }}>H</span>
-            <span style={{ fontSize:11, fontWeight:700, color:theme.muted, textAlign:"right", minWidth:30 }}>B</span>
-          </div>
           {activeAreas.map(a => {
             const h = houses.filter(x=>x.areaId===a.id).length;
             const b = businesses.filter(x=>x.areaId===a.id).length;
@@ -675,28 +863,19 @@ function ReportsPage({ nav, theme, refresh, toast }) {
 function FollowUpsPage({ nav, theme, refresh, toast, bump }) {
   const [followups, setFollowups] = useState([]);
   useEffect(() => { dbGetAll("followups").then(setFollowups); }, [refresh]);
-
   const today = new Date().toISOString().split("T")[0];
   const nextWeek = new Date(); nextWeek.setDate(nextWeek.getDate()+7);
   const nextWeekStr = nextWeek.toISOString().split("T")[0];
   const pending = followups.filter(f=>!f.completed);
-
-  const markDone = async (f) => {
-    await dbPut("followups", {...f, completed:true});
-    toast("Marked complete!"); bump();
-  };
-
-  const Section = ({title, items, color}) => (
+  const markDone = async (f) => { await dbPut("followups", {...f, completed:true}); toast("Marked complete!"); bump(); };
+  const Sec = ({title, items, color}) => (
     <div style={{ marginBottom:20 }}>
       <div style={{ fontSize:13, fontWeight:700, color, marginBottom:10 }}>{title} ({items.length})</div>
-      {items.length===0 ? (
-        <div style={{ padding:"16px", textAlign:"center", fontSize:13, color:theme.muted, border:`1px dashed ${theme.border}`, borderRadius:10 }}>All clear ✓</div>
-      ) : items.map(f => (
+      {items.length===0 ? <div style={{ padding:"16px", textAlign:"center", fontSize:13, color:theme.muted, border:`1px dashed ${theme.border}`, borderRadius:10 }}>All clear ✓</div>
+      : items.map(f => (
         <div key={f.id} style={{ background:theme.card, border:`1px solid ${theme.border}`, borderRadius:12, padding:"12px 14px", marginBottom:8, display:"flex", gap:10, alignItems:"flex-start" }}>
           <div style={{ flex:1 }}>
-            <div style={{ fontWeight:700, fontSize:13, color:theme.text, cursor:"pointer" }} onClick={()=>nav(f.entityType==="house"?"house-detail":"biz-detail",{id:f.entityId})}>
-              {f.entityName}
-            </div>
+            <div style={{ fontWeight:700, fontSize:13, color:theme.text, cursor:"pointer" }} onClick={()=>nav(f.entityType==="house"?"house-detail":"biz-detail",{id:f.entityId})}>{f.entityName}</div>
             <div style={{ fontSize:11, color:theme.muted, margin:"2px 0" }}>📅 {f.followUpDate}</div>
             {f.notes && <div style={{ fontSize:12, color:theme.muted }}>{f.notes}</div>}
           </div>
@@ -705,14 +884,13 @@ function FollowUpsPage({ nav, theme, refresh, toast, bump }) {
       ))}
     </div>
   );
-
   return (
     <div>
       <PageHeader title="Follow-ups" onBack={() => nav("dashboard")} theme={theme} />
       <div style={{ padding:"0 16px 80px" }}>
-        <Section title="⚠️ Overdue" items={pending.filter(f=>f.followUpDate<today)} color={theme.danger} />
-        <Section title="📅 Today" items={pending.filter(f=>f.followUpDate===today)} color={theme.primary} />
-        <Section title="📆 This Week" items={pending.filter(f=>f.followUpDate>today&&f.followUpDate<=nextWeekStr)} color={theme.muted} />
+        <Sec title="⚠️ Overdue" items={pending.filter(f=>f.followUpDate<today)} color={theme.danger} />
+        <Sec title="📅 Today" items={pending.filter(f=>f.followUpDate===today)} color={theme.primary} />
+        <Sec title="📆 This Week" items={pending.filter(f=>f.followUpDate>today&&f.followUpDate<=nextWeekStr)} color={theme.muted} />
       </div>
     </div>
   );
@@ -721,72 +899,36 @@ function FollowUpsPage({ nav, theme, refresh, toast, bump }) {
 // ─── Settings Page ────────────────────────────────────────────────────────────
 function SettingsPage({ nav, theme, dark, setDark, toast, bump }) {
   const fileRef = useRef();
-
   const doExport = async () => {
     const json = await dbExport();
     const blob = new Blob([json],{type:"application/json"});
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href=url; a.download=`tensa-beat-backup-${new Date().toISOString().split("T")[0]}.json`;
-    a.click(); URL.revokeObjectURL(url);
-    toast("Backup exported!");
+    a.click(); URL.revokeObjectURL(url); toast("Backup exported!");
   };
-
   const doImport = async (e) => {
     const file = e.target.files?.[0]; if(!file) return;
-    try {
-      const text = await file.text();
-      await dbImport(text);
-      toast("Database restored!"); bump();
-      setTimeout(()=>window.location.reload(),800);
-    } catch { toast("Invalid backup file","error"); }
+    try { const text = await file.text(); await dbImport(text); toast("Database restored!"); bump(); setTimeout(()=>window.location.reload(),800); }
+    catch { toast("Invalid backup file","error"); }
   };
-
-  const exportCSV = async () => {
-    const [houses, businesses, areas] = await Promise.all([dbGetAll("houses"), dbGetAll("businesses"), dbGetAll("areas")]);
-    let csv = "HOUSES\nID,Area,House No,Owner,Mobile,Alt Mobile,Family Size,Status,Color,GPS Lat,GPS Lng,Address Notes,Delivery Notes,Created\n";
-    houses.forEach(h => {
-      const area = areas.find(a=>a.id===h.areaId)?.name||"";
-      csv += `"${h.id}","${area}","${h.houseNumber}","${h.ownerName}","${h.mobileNumber}","${h.alternateNumber}","${h.familySize}","${h.customerStatus}","${h.colorMarker}","${h.gpsLat||""}","${h.gpsLng||""}","${h.addressNotes||""}","${h.deliveryNotes||""}","${h.createdAt}"\n`;
-    });
-    csv += "\nBUSINESSES\nID,Area,Business Name,Owner,Mobile,Type,Services,Follow-up,Remarks,Created\n";
-    businesses.forEach(b => {
-      const area = areas.find(a=>a.id===b.areaId)?.name||"";
-      csv += `"${b.id}","${area}","${b.businessName}","${b.ownerName}","${b.mobileNumber}","${b.businessType}","${(b.interestedServices||[]).join(";")}","${b.followUpDate||""}","${b.remarks||""}","${b.createdAt}"\n`;
-    });
-    const blob = new Blob([csv],{type:"text/csv"});
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href=url; a.download=`tensa-beat-full-${new Date().toISOString().split("T")[0]}.csv`;
-    a.click(); URL.revokeObjectURL(url);
-    toast("Full CSV exported!");
-  };
-
   return (
     <div>
       <PageHeader title="Settings" onBack={() => nav("dashboard")} theme={theme} />
       <div style={{ padding:"0 16px 80px", display:"flex", flexDirection:"column", gap:20 }}>
-        <Section title="APPEARANCE" theme={theme}>
-          <SettingRow icon="🌙" label="Dark Mode" theme={theme}>
-            <Toggle checked={dark} onChange={setDark} theme={theme} />
-          </SettingRow>
-        </Section>
-
-        <Section title="DATA MANAGEMENT" theme={theme}>
+        <Sec title="APPEARANCE" theme={theme}>
+          <SettingRow icon="🌙" label="Dark Mode" theme={theme}><Toggle checked={dark} onChange={setDark} theme={theme} /></SettingRow>
+        </Sec>
+        <Sec title="DATA MANAGEMENT" theme={theme}>
           <SettingRow icon="⬇️" label="Export Backup (JSON)" sub="Save full database" theme={theme} onClick={doExport} />
           <SettingRow icon="⬆️" label="Restore from Backup" sub="Load from JSON file" theme={theme} onClick={()=>fileRef.current?.click()} border={false} />
           <input type="file" accept=".json" ref={fileRef} style={{display:"none"}} onChange={doImport} />
-        </Section>
-
-        <Section title="EXPORT DATA" theme={theme}>
-          <SettingRow icon="📊" label="Export Full CSV" sub="Houses & businesses with all fields" theme={theme} onClick={exportCSV} border={false} />
-        </Section>
-
-        <Section title="ABOUT" theme={theme}>
-          <SettingRow icon="ℹ️" label="Version" theme={theme}><span style={{fontSize:13,color:theme.muted}}>1.0.0</span></SettingRow>
-          <SettingRow icon="💾" label="Storage" theme={theme}><span style={{fontSize:13,color:theme.muted}}>IndexedDB</span></SettingRow>
+        </Sec>
+        <Sec title="ABOUT" theme={theme}>
+          <SettingRow icon="ℹ️" label="Version" theme={theme}><span style={{fontSize:13,color:theme.muted}}>2.0.0</span></SettingRow>
+          <SettingRow icon="🗺️" label="Map" theme={theme}><span style={{fontSize:13,color:theme.muted}}>OpenStreetMap</span></SettingRow>
           <SettingRow icon="🌐" label="Network" border={false} theme={theme}><span style={{fontSize:13,color:navigator.onLine?"#22c55e":"#f97316"}}>{navigator.onLine?"Online":"Offline"}</span></SettingRow>
-        </Section>
+        </Sec>
       </div>
     </div>
   );
@@ -796,76 +938,57 @@ function SettingsPage({ nav, theme, dark, setDark, toast, bump }) {
 function HouseDetail({ nav, theme, params, toast, bump }) {
   const [house, setHouse] = useState(null);
   const [area, setArea] = useState(null);
-
   useEffect(() => {
     if (!params.id) return;
-    dbGet("houses", params.id).then(h => {
-      setHouse(h);
-      if (h) dbGet("areas", h.areaId).then(setArea);
-    });
+    dbGet("houses", params.id).then(h => { setHouse(h); if (h) dbGet("areas", h.areaId).then(setArea); });
   }, [params.id]);
-
   const del = async () => {
     if (!confirm("Delete this house record?")) return;
-    await dbDelete("houses", house.id);
-    toast("House deleted"); bump(); nav("dashboard");
+    await dbDelete("houses", house.id); toast("House deleted"); bump(); nav("dashboard");
   };
-
   if (!house) return <div style={{ padding:40, textAlign:"center", color:"#888" }}>Loading…</div>;
-
   return (
     <div>
       <div style={{ background:theme.card, borderBottom:`1px solid ${theme.border}`, padding:"14px 16px", display:"flex", alignItems:"center", gap:12, position:"sticky", top:0, zIndex:50 }}>
-        <button onClick={() => nav("dashboard")} style={{ background:"none", border:"none", cursor:"pointer", fontSize:22, padding:"0 4px" }}>←</button>
+        <button onClick={() => nav("dashboard")} style={{ background:"none", border:"none", cursor:"pointer", fontSize:22 }}>←</button>
         <div style={{ flex:1, fontSize:17, fontWeight:800, color:theme.text, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{house.ownerName||"Unknown"}</div>
         <button onClick={() => nav("add",{editId:house.id, editType:"house", type:"house"})} style={{ background:"none", border:`1px solid ${theme.border}`, borderRadius:8, padding:"6px 12px", cursor:"pointer", fontSize:13, color:theme.primary, fontWeight:700 }}>Edit</button>
         <button onClick={del} style={{ background:"none", border:"none", cursor:"pointer", fontSize:20 }}>🗑️</button>
       </div>
       <div style={{ padding:"16px", display:"flex", flexDirection:"column", gap:12 }}>
-        {/* Status + marker */}
         <div style={{ display:"flex", gap:10, alignItems:"center" }}>
           <StatusBadge status={house.customerStatus} />
           <div style={{ width:14, height:14, borderRadius:"50%", background:COLOR_MAP[house.colorMarker]||"#888", border:"2px solid #fff", boxShadow:"0 1px 3px rgba(0,0,0,.3)" }} />
           <span style={{ fontSize:12, color:theme.muted, textTransform:"capitalize" }}>{house.colorMarker} marker</span>
         </div>
-
         <InfoCard theme={theme}>
           <InfoRow label="Area" value={area?.name||"—"} theme={theme} />
           <InfoRow label="House No." value={house.houseNumber} theme={theme} />
           <InfoRow label="Sub Area" value={house.subArea||"—"} theme={theme} />
           <InfoRow label="Family Size" value={house.familySize} theme={theme} />
         </InfoCard>
-
         {(house.mobileNumber||house.alternateNumber) && (
           <InfoCard theme={theme}>
             {house.mobileNumber && (
               <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"10px 0", borderBottom:`1px solid ${theme.border}` }}>
-                <div>
-                  <div style={{ fontSize:11, color:theme.muted }}>MOBILE</div>
-                  <div style={{ fontSize:14, fontWeight:700, color:theme.text }}>{house.mobileNumber}</div>
-                </div>
+                <div><div style={{ fontSize:11, color:theme.muted }}>MOBILE</div><div style={{ fontSize:14, fontWeight:700, color:theme.text }}>{house.mobileNumber}</div></div>
                 <a href={`tel:${house.mobileNumber}`} style={{ background:theme.primary, color:"#fff", padding:"8px 14px", borderRadius:8, textDecoration:"none", fontSize:13, fontWeight:700 }}>📞 Call</a>
               </div>
             )}
             {house.alternateNumber && (
               <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"10px 0" }}>
-                <div>
-                  <div style={{ fontSize:11, color:theme.muted }}>ALT MOBILE</div>
-                  <div style={{ fontSize:14, fontWeight:700, color:theme.text }}>{house.alternateNumber}</div>
-                </div>
+                <div><div style={{ fontSize:11, color:theme.muted }}>ALT MOBILE</div><div style={{ fontSize:14, fontWeight:700, color:theme.text }}>{house.alternateNumber}</div></div>
                 <a href={`tel:${house.alternateNumber}`} style={{ background:theme.primary+"22", color:theme.primary, padding:"8px 14px", borderRadius:8, textDecoration:"none", fontSize:13, fontWeight:700 }}>📞 Call</a>
               </div>
             )}
           </InfoCard>
         )}
-
         {(house.addressNotes||house.deliveryNotes) && (
           <InfoCard theme={theme}>
             {house.addressNotes && <InfoRow label="Address Notes" value={house.addressNotes} theme={theme} />}
             {house.deliveryNotes && <InfoRow label="Delivery Notes" value={house.deliveryNotes} theme={theme} border={false} />}
           </InfoCard>
         )}
-
         {(house.gpsLat&&house.gpsLng) && (
           <a href={`https://maps.google.com?q=${house.gpsLat},${house.gpsLng}`} target="_blank" rel="noreferrer"
             style={{ background:theme.primary+"15", border:`1px solid ${theme.primary}44`, borderRadius:12, padding:14, display:"flex", alignItems:"center", gap:10, textDecoration:"none", color:theme.primary, fontWeight:700, fontSize:14 }}>
@@ -873,16 +996,8 @@ function HouseDetail({ nav, theme, params, toast, bump }) {
             <span style={{ fontSize:11, color:theme.muted, fontWeight:400 }}>{house.gpsLat.toFixed(5)}, {house.gpsLng.toFixed(5)}</span>
           </a>
         )}
-
-        {house.photoUrl && (
-          <div style={{ borderRadius:12, overflow:"hidden", border:`1px solid ${theme.border}` }}>
-            <img src={house.photoUrl} alt="House" style={{ width:"100%", display:"block" }} />
-          </div>
-        )}
-
-        <div style={{ fontSize:11, color:theme.muted, textAlign:"center", paddingTop:4 }}>
-          Added {new Date(house.createdAt).toLocaleDateString()} • Updated {new Date(house.updatedAt).toLocaleDateString()}
-        </div>
+        {house.photoUrl && <div style={{ borderRadius:12, overflow:"hidden", border:`1px solid ${theme.border}` }}><img src={house.photoUrl} alt="House" style={{ width:"100%", display:"block" }} /></div>}
+        <div style={{ fontSize:11, color:theme.muted, textAlign:"center", paddingTop:4 }}>Added {new Date(house.createdAt).toLocaleDateString()} • Updated {new Date(house.updatedAt).toLocaleDateString()}</div>
       </div>
     </div>
   );
@@ -892,167 +1007,112 @@ function HouseDetail({ nav, theme, params, toast, bump }) {
 function BizDetail({ nav, theme, params, toast, bump }) {
   const [biz, setBiz] = useState(null);
   const [area, setArea] = useState(null);
-
   useEffect(() => {
     if (!params.id) return;
-    dbGet("businesses", params.id).then(b => {
-      setBiz(b);
-      if (b) dbGet("areas", b.areaId).then(setArea);
-    });
+    dbGet("businesses", params.id).then(b => { setBiz(b); if (b) dbGet("areas", b.areaId).then(setArea); });
   }, [params.id]);
-
   const del = async () => {
     if (!confirm("Delete this business?")) return;
-    await dbDelete("businesses", biz.id);
-    toast("Business deleted"); bump(); nav("dashboard");
+    await dbDelete("businesses", biz.id); toast("Business deleted"); bump(); nav("dashboard");
   };
-
   if (!biz) return <div style={{ padding:40, textAlign:"center", color:"#888" }}>Loading…</div>;
-
   return (
     <div>
       <div style={{ background:theme.card, borderBottom:`1px solid ${theme.border}`, padding:"14px 16px", display:"flex", alignItems:"center", gap:12, position:"sticky", top:0, zIndex:50 }}>
-        <button onClick={() => nav("dashboard")} style={{ background:"none", border:"none", cursor:"pointer", fontSize:22, padding:"0 4px" }}>←</button>
+        <button onClick={() => nav("dashboard")} style={{ background:"none", border:"none", cursor:"pointer", fontSize:22 }}>←</button>
         <div style={{ flex:1, fontSize:17, fontWeight:800, color:theme.text, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{biz.businessName}</div>
         <button onClick={() => nav("add",{editId:biz.id, editType:"business", type:"business"})} style={{ background:"none", border:`1px solid ${theme.border}`, borderRadius:8, padding:"6px 12px", cursor:"pointer", fontSize:13, color:theme.accent, fontWeight:700 }}>Edit</button>
         <button onClick={del} style={{ background:"none", border:"none", cursor:"pointer", fontSize:20 }}>🗑️</button>
       </div>
       <div style={{ padding:"16px", display:"flex", flexDirection:"column", gap:12 }}>
         <span style={{ background:theme.accent+"22", color:theme.accent, padding:"4px 12px", borderRadius:8, fontSize:12, fontWeight:700, textTransform:"capitalize", alignSelf:"flex-start" }}>{biz.businessType}</span>
-
         <InfoCard theme={theme}>
           <InfoRow label="Area" value={area?.name||"—"} theme={theme} />
           <InfoRow label="Owner / Contact" value={biz.ownerName} theme={theme} border={false} />
         </InfoCard>
-
         {biz.mobileNumber && (
           <div style={{ background:theme.card, border:`1px solid ${theme.border}`, borderRadius:12, padding:14, display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-            <div>
-              <div style={{ fontSize:11, color:theme.muted }}>MOBILE</div>
-              <div style={{ fontSize:16, fontWeight:800, color:theme.text }}>{biz.mobileNumber}</div>
-            </div>
+            <div><div style={{ fontSize:11, color:theme.muted }}>MOBILE</div><div style={{ fontSize:16, fontWeight:800, color:theme.text }}>{biz.mobileNumber}</div></div>
             <a href={`tel:${biz.mobileNumber}`} style={{ background:theme.accent, color:"#fff", padding:"10px 16px", borderRadius:10, textDecoration:"none", fontSize:14, fontWeight:700 }}>📞 Call</a>
           </div>
         )}
-
         {biz.interestedServices?.length > 0 && (
           <InfoCard theme={theme}>
             <div style={{ fontSize:11, color:theme.muted, marginBottom:8 }}>INTERESTED SERVICES</div>
             <div style={{ display:"flex", flexWrap:"wrap", gap:6 }}>
-              {biz.interestedServices.map(s => (
-                <span key={s} style={{ background:theme.primary+"18", color:theme.primary, padding:"4px 10px", borderRadius:6, fontSize:12, fontWeight:600 }}>{s}</span>
-              ))}
+              {biz.interestedServices.map(s => <span key={s} style={{ background:theme.primary+"18", color:theme.primary, padding:"4px 10px", borderRadius:6, fontSize:12, fontWeight:600 }}>{s}</span>)}
             </div>
           </InfoCard>
         )}
-
         {biz.followUpDate && (
           <div style={{ background:"#f59e0b22", border:"1px solid #f59e0b44", borderRadius:12, padding:14, display:"flex", alignItems:"center", gap:10 }}>
             <span style={{ fontSize:20 }}>📅</span>
-            <div>
-              <div style={{ fontSize:11, color:theme.muted }}>FOLLOW-UP DATE</div>
-              <div style={{ fontSize:14, fontWeight:700, color:"#f59e0b" }}>{biz.followUpDate}</div>
-            </div>
+            <div><div style={{ fontSize:11, color:theme.muted }}>FOLLOW-UP DATE</div><div style={{ fontSize:14, fontWeight:700, color:"#f59e0b" }}>{biz.followUpDate}</div></div>
           </div>
         )}
-
-        {biz.remarks && (
-          <InfoCard theme={theme}>
-            <InfoRow label="Remarks" value={biz.remarks} theme={theme} border={false} />
-          </InfoCard>
-        )}
-
-        <div style={{ fontSize:11, color:theme.muted, textAlign:"center" }}>
-          Added {new Date(biz.createdAt).toLocaleDateString()} • Updated {new Date(biz.updatedAt).toLocaleDateString()}
-        </div>
+        {biz.remarks && <InfoCard theme={theme}><InfoRow label="Remarks" value={biz.remarks} theme={theme} border={false} /></InfoCard>}
+        <div style={{ fontSize:11, color:theme.muted, textAlign:"center" }}>Added {new Date(biz.createdAt).toLocaleDateString()}</div>
       </div>
     </div>
   );
 }
 
-// ─── Reusable UI Components ───────────────────────────────────────────────────
+// ─── Shared UI ────────────────────────────────────────────────────────────────
 function PageHeader({ title, onBack, theme }) {
   return (
     <div style={{ background:theme.card, borderBottom:`1px solid ${theme.border}`, padding:"14px 16px", display:"flex", alignItems:"center", gap:12, position:"sticky", top:0, zIndex:50 }}>
-      <button onClick={onBack} style={{ background:"none", border:"none", cursor:"pointer", fontSize:22, padding:"0 4px" }}>←</button>
+      <button onClick={onBack} style={{ background:"none", border:"none", cursor:"pointer", fontSize:22 }}>←</button>
       <div style={{ fontSize:18, fontWeight:800, color:theme.text }}>{title}</div>
     </div>
   );
 }
-
-function SectionLabel({ theme, children }) {
-  return <div style={{ fontSize:12, fontWeight:700, color:theme.muted, marginBottom:10, letterSpacing:.5 }}>{children}</div>;
-}
-
+function SectionLabel({ theme, children }) { return <div style={{ fontSize:12, fontWeight:700, color:theme.muted, marginBottom:10, letterSpacing:.5 }}>{children}</div>; }
 function QuickBtn({ theme, color, icon, label, onClick, outline }) {
-  return (
-    <button onClick={onClick} style={{ padding:"16px 12px", borderRadius:14, border:`2px solid ${outline?color+"44":color}`, background:outline?color+"10":color, color:outline?color:"#fff", fontWeight:700, fontSize:14, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", gap:8 }}>
-      <span style={{ fontSize:20 }}>{icon}</span> {label}
-    </button>
-  );
+  return <button onClick={onClick} style={{ padding:"16px 12px", borderRadius:14, border:`2px solid ${outline?color+"44":color}`, background:outline?color+"10":color, color:outline?color:"#fff", fontWeight:700, fontSize:14, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", gap:8 }}><span style={{ fontSize:20 }}>{icon}</span> {label}</button>;
 }
-
 function StatusBadge({ status }) {
   const c = STATUS_COLOR[status]||"#888";
   return <span style={{ background:c+"22", color:c, padding:"3px 10px", borderRadius:6, fontSize:11, fontWeight:700, textTransform:"capitalize" }}>{status}</span>;
 }
-
 function SearchBar({ value, onChange, theme, placeholder, autoFocus }) {
   return (
     <div style={{ position:"relative" }}>
       <span style={{ position:"absolute", left:12, top:"50%", transform:"translateY(-50%)", fontSize:18 }}>🔍</span>
-      <input value={value} onChange={onChange} placeholder={placeholder} autoFocus={autoFocus}
-        style={{ width:"100%", padding:"12px 12px 12px 42px", borderRadius:12, border:`1px solid ${theme.border}`, background:theme.card, color:theme.text, fontSize:14, outline:"none", boxSizing:"border-box" }} />
+      <input value={value} onChange={onChange} placeholder={placeholder} autoFocus={autoFocus} style={{ width:"100%", padding:"12px 12px 12px 42px", borderRadius:12, border:`1px solid ${theme.border}`, background:theme.card, color:theme.text, fontSize:14, outline:"none", boxSizing:"border-box" }} />
     </div>
   );
 }
-
 function FormInput({ label, value, onChange, theme, type="text", min }) {
   return (
     <div>
       <div style={{ fontSize:12, fontWeight:700, color:theme.muted, marginBottom:5 }}>{label}</div>
-      <input value={value||""} onChange={onChange} type={type} min={min}
-        style={{ width:"100%", padding:"12px", borderRadius:10, border:`1px solid ${theme.border}`, background:theme.card, color:theme.text, fontSize:14, outline:"none", boxSizing:"border-box" }} />
+      <input value={value||""} onChange={onChange} type={type} min={min} style={{ width:"100%", padding:"12px", borderRadius:10, border:`1px solid ${theme.border}`, background:theme.card, color:theme.text, fontSize:14, outline:"none", boxSizing:"border-box" }} />
     </div>
   );
 }
-
 function FormTextarea({ label, value, onChange, theme }) {
   return (
     <div>
       <div style={{ fontSize:12, fontWeight:700, color:theme.muted, marginBottom:5 }}>{label}</div>
-      <textarea value={value||""} onChange={onChange} rows={3}
-        style={{ width:"100%", padding:"12px", borderRadius:10, border:`1px solid ${theme.border}`, background:theme.card, color:theme.text, fontSize:14, outline:"none", boxSizing:"border-box", resize:"vertical" }} />
+      <textarea value={value||""} onChange={onChange} rows={3} style={{ width:"100%", padding:"12px", borderRadius:10, border:`1px solid ${theme.border}`, background:theme.card, color:theme.text, fontSize:14, outline:"none", boxSizing:"border-box", resize:"vertical" }} />
     </div>
   );
 }
-
 function FormSelect({ label, value, onChange, theme, options, placeholder }) {
   return (
     <div>
       <div style={{ fontSize:12, fontWeight:700, color:theme.muted, marginBottom:5 }}>{label}</div>
-      <select value={value||""} onChange={onChange}
-        style={{ width:"100%", padding:"12px", borderRadius:10, border:`1px solid ${theme.border}`, background:theme.card, color:value?theme.text:theme.muted, fontSize:14, outline:"none", boxSizing:"border-box" }}>
+      <select value={value||""} onChange={onChange} style={{ width:"100%", padding:"12px", borderRadius:10, border:`1px solid ${theme.border}`, background:theme.card, color:value?theme.text:theme.muted, fontSize:14, outline:"none", boxSizing:"border-box" }}>
         <option value="">{placeholder||"Select…"}</option>
         {options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
       </select>
     </div>
   );
 }
-
 function SaveBtn({ label, color, onClick, saving }) {
-  return (
-    <button onClick={onClick} disabled={saving}
-      style={{ width:"100%", padding:"16px", borderRadius:14, background:color, color:"#fff", border:"none", fontSize:16, fontWeight:800, cursor:saving?"not-allowed":"pointer", opacity:saving?.7:1, marginTop:8 }}>
-      {saving ? "Saving…" : label}
-    </button>
-  );
+  return <button onClick={onClick} disabled={saving} style={{ width:"100%", padding:"16px", borderRadius:14, background:color, color:"#fff", border:"none", fontSize:16, fontWeight:800, cursor:saving?"not-allowed":"pointer", opacity:saving?.7:1, marginTop:8 }}>{saving ? "Saving…" : label}</button>;
 }
-
-function InfoCard({ theme, children }) {
-  return <div style={{ background:theme.card, border:`1px solid ${theme.border}`, borderRadius:12, padding:"4px 14px", overflow:"hidden" }}>{children}</div>;
-}
-
+function InfoCard({ theme, children }) { return <div style={{ background:theme.card, border:`1px solid ${theme.border}`, borderRadius:12, padding:"4px 14px", overflow:"hidden" }}>{children}</div>; }
 function InfoRow({ label, value, theme, border=true }) {
   return (
     <div style={{ padding:"10px 0", borderBottom:border?`1px solid ${theme.border}`:"none" }}>
@@ -1061,8 +1121,7 @@ function InfoRow({ label, value, theme, border=true }) {
     </div>
   );
 }
-
-function Section({ title, theme, children }) {
+function Sec({ title, theme, children }) {
   return (
     <div>
       <div style={{ fontSize:11, fontWeight:700, color:theme.muted, marginBottom:8, letterSpacing:.8 }}>{title}</div>
@@ -1070,7 +1129,6 @@ function Section({ title, theme, children }) {
     </div>
   );
 }
-
 function SettingRow({ icon, label, sub, children, theme, onClick, border=true }) {
   return (
     <div onClick={onClick} style={{ padding:"14px 16px", display:"flex", alignItems:"center", gap:12, borderBottom:border?`1px solid ${theme.border}`:"none", cursor:onClick?"pointer":"default" }}>
@@ -1083,7 +1141,6 @@ function SettingRow({ icon, label, sub, children, theme, onClick, border=true })
     </div>
   );
 }
-
 function Toggle({ checked, onChange, theme }) {
   return (
     <div onClick={() => onChange(!checked)} style={{ width:48, height:26, borderRadius:13, background:checked?theme.primary:theme.border, cursor:"pointer", position:"relative", transition:"background .2s" }}>
