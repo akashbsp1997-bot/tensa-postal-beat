@@ -336,6 +336,7 @@ function PostmanApp({ user, theme, onLogout, toast, dark, setDark }) {
 
   const pages = {
     dashboard: <PostmanDashboard nav={nav} theme={theme} user={user} refresh={refresh} />,
+    scan:      <ScanArticles nav={nav} theme={theme} user={user} toast={toast} bump={bump} refresh={refresh} />,
     map:       <MapPage nav={nav} theme={theme} refresh={refresh} user={user} toast={toast} bump={bump} />,
     "add-house":  <AddHouse nav={nav} theme={theme} params={pageParams} toast={toast} bump={bump} user={user} />,
     "add-biz":    <AddBusiness nav={nav} theme={theme} params={pageParams} toast={toast} bump={bump} user={user} />,
@@ -343,7 +344,9 @@ function PostmanApp({ user, theme, onLogout, toast, dark, setDark }) {
     settings:  <SettingsPage nav={nav} theme={theme} user={user} onLogout={onLogout} dark={dark} setDark={setDark} toast={toast} />,
     "house-detail": <HouseDetail nav={nav} theme={theme} params={pageParams} toast={toast} bump={bump} user={user} />,
     "biz-detail":   <BizDetail nav={nav} theme={theme} params={pageParams} toast={toast} bump={bump} user={user} />,
+    "article-detail": <ArticleDetail nav={nav} theme={theme} params={pageParams} toast={toast} bump={bump} user={user} />,
   };
+
 
   const navItems = [
     {id:"dashboard",icon:"🏠",label:"Home"},
