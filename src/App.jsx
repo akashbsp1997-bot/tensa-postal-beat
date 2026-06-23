@@ -347,11 +347,13 @@ function PostmanApp({ user, theme, onLogout, toast, dark, setDark }) {
 
   const navItems = [
     {id:"dashboard",icon:"🏠",label:"Home"},
+    {id:"scan",icon:"📱",label:"Scan"},
     {id:"map",icon:"🗺️",label:"Map"},
     {id:"add-house",icon:"➕",label:"Add"},
     {id:"search",icon:"🔍",label:"Search"},
     {id:"settings",icon:"⚙️",label:"Settings"},
   ];
+
 
   const hideNav = ["add-house","add-biz","house-detail","biz-detail","map"].includes(page);
 
