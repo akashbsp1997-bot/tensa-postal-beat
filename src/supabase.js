@@ -71,6 +71,20 @@ export const db = {
   getDeliveries: (userId) => sb("GET", "deliveries", { query: `?postman_id=eq.${userId}&order=created_at.desc` }),
   createDelivery: (data) => sb("POST", "deliveries", { body: data }),
   updateDelivery: (id, data) => sb("PATCH", "deliveries", { body: data, query: `?id=eq.${id}` }),
+
+  // Articles
+  getArticles: () => sb("GET", "articles", { query: "?order=created_at.desc" }),
+  getArticlesByArea: (areaId) => sb("GET", "articles", { query: `?area_id=eq.${areaId}&status=eq.scanned&order=created_at.desc` }),
+  getArticlesByDateRange: (startDate, endDate) => sb("GET", "articles", { query: `?created_at=gte.${startDate}&created_at=lt.${endDate}&status=eq.scanned&order=created_at.desc` }),
+  getArticleByBarcode: (barcode) => sb("GET", "articles", { query: `?barcode=eq.${barcode}` }),
+  createArticle: (data) => sb("POST", "articles", { body: data }),
+  updateArticle: (id, data) => sb("PATCH", "articles", { body: data, query: `?id=eq.${id}` }),
+  deleteArticle: (id) => sb("DELETE", "articles", { query: `?id=eq.${id}` }),
+
+  // Delivery Proofs
+  createDeliveryProof: (data) => sb("POST", "delivery_proofs", { body: data }),
+  getDeliveryProofs: (articleId) => sb("GET", "delivery_proofs", { query: `?article_id=eq.${articleId}` }),
 };
+
 
 export const isOnline = () => navigator.onLine;
