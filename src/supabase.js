@@ -1,347 +1,76 @@
-import { createClient } from "@supabase/supabase-js";
+// ─── Supabase Client ──────────────────────────────────────────────────────────
+const SUPABASE_URL = "https://shbeodccicserfvwcphw.supabase.co";
+const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNoYmVvZGNjaWNzZXJmdndjcGh3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIxNDkwMTcsImV4cCI6MjA5NzcyNTAxN30.ubVpiyTpCnc7nVYFNyBwQEeZny5AS7RpataVDaRTUAw";
 
-const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
-const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
+const headers = {
+  "Content-Type": "application/json",
+  "apikey": SUPABASE_KEY,
+  "Authorization": `Bearer ${SUPABASE_KEY}`,
+  "Prefer": "return=representation",
+};
 
-export const supabase = createClient(
-  SUPABASE_URL,
-  SUPABASE_ANON_KEY,
-  {
-    auth: {
-      persistSession: true,
-      autoRefreshToken: true,
-    },
-  }
-);
-
-export const isOnline = () => navigator.onLine;
-
-const handle = async (query) => {
-  const { data, error } = await query;
-
-  if (error) {
-    console.error(error);
+async function sb(method, table, { body, query = "" } = {}) {
+  const url = `${SUPABASE_URL}/rest/v1/${table}${query}`;
+  try {
+    const res = await fetch(url, {
+      method,
+      headers,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    if (!res.ok) {
+      const err = await res.text();
+      console.error("Supabase error:", err);
+      return null;
+    }
+    const text = await res.text();
+    return text ? JSON.parse(text) : [];
+  } catch (e) {
+    console.error("Network error:", e);
     return null;
   }
-
-  return data;
-};
+}
 
 export const db = {
-  // =========================
-  // USERS
-  // =========================
+  // Users
+  getUsers: () => sb("GET", "users", { query: "?order=name" }),
+  getUsersByRole: (role) => sb("GET", "users", { query: `?role=eq.${role}&order=name` }),
+  createUser: (data) => sb("POST", "users", { body: data }),
+  updateUser: (id, data) => sb("PATCH", "users", { body: data, query: `?id=eq.${id}` }),
+  deleteUser: (id) => sb("DELETE", "users", { query: `?id=eq.${id}` }),
 
-  getUsers: async () =>
-    handle(
-      supabase
-        .from("users")
-        .select("*")
-        .order("name")
-    ),
+  // Areas
+  getAreas: () => sb("GET", "areas", { query: "?order=name" }),
+  getAreasByUser: (userId) => sb("GET", "areas", { query: `?assigned_to=eq.${userId}&order=name` }),
+  createArea: (data) => sb("POST", "areas", { body: data }),
+  updateArea: (id, data) => sb("PATCH", "areas", { body: data, query: `?id=eq.${id}` }),
+  deleteArea: (id) => sb("DELETE", "areas", { query: `?id=eq.${id}` }),
 
-  getUser: async (id) =>
-    handle(
-      supabase
-        .from("users")
-        .select("*")
-        .eq("id", id)
-        .single()
-    ),
+  // Houses
+  getHouses: () => sb("GET", "houses", { query: "?order=created_at.desc" }),
+  getHousesByArea: (areaId) => sb("GET", "houses", { query: `?area_id=eq.${areaId}&order=created_at.desc` }),
+  getHousesByUser: (userId) => sb("GET", "houses", { query: `?assigned_to=eq.${userId}&order=created_at.desc` }),
+  createHouse: (data) => sb("POST", "houses", { body: data }),
+  updateHouse: (id, data) => sb("PATCH", "houses", { body: data, query: `?id=eq.${id}` }),
+  deleteHouse: (id) => sb("DELETE", "houses", { query: `?id=eq.${id}` }),
 
-  createUser: async (user) =>
-    handle(
-      supabase
-        .from("users")
-        .insert([user])
-        .select()
-        .single()
-    ),
+  // Businesses
+  getBusinesses: () => sb("GET", "businesses", { query: "?order=created_at.desc" }),
+  getBusinessesByArea: (areaId) => sb("GET", "businesses", { query: `?area_id=eq.${areaId}&order=created_at.desc` }),
+  getBusinessesByUser: (userId) => sb("GET", "businesses", { query: `?assigned_to=eq.${userId}&order=created_at.desc` }),
+  createBusiness: (data) => sb("POST", "businesses", { body: data }),
+  updateBusiness: (id, data) => sb("PATCH", "businesses", { body: data, query: `?id=eq.${id}` }),
+  deleteBusiness: (id) => sb("DELETE", "businesses", { query: `?id=eq.${id}` }),
 
-  updateUser: async (id, updates) =>
-    handle(
-      supabase
-        .from("users")
-        .update(updates)
-        .eq("id", id)
-        .select()
-        .single()
-    ),
+  // Followups
+  getFollowups: (userId) => sb("GET", "followups", { query: `?assigned_to=eq.${userId}&completed=eq.false&order=follow_up_date` }),
+  getAllFollowups: () => sb("GET", "followups", { query: "?completed=eq.false&order=follow_up_date" }),
+  createFollowup: (data) => sb("POST", "followups", { body: data }),
+  updateFollowup: (id, data) => sb("PATCH", "followups", { body: data, query: `?id=eq.${id}` }),
 
-  deleteUser: async (id) =>
-    handle(
-      supabase
-        .from("users")
-        .delete()
-        .eq("id", id)
-    ),
-
-  // =========================
-  // AREAS
-  // =========================
-
-  getAreas: async () =>
-    handle(
-      supabase
-        .from("areas")
-        .select("*")
-        .order("name")
-    ),
-
-  getArea: async (id) =>
-    handle(
-      supabase
-        .from("areas")
-        .select("*")
-        .eq("id", id)
-        .single()
-    ),
-
-  getAreasByUser: async (userId) =>
-    handle(
-      supabase
-        .from("areas")
-        .select("*")
-        .eq("assigned_to", userId)
-        .order("name")
-    ),
-
-  createArea: async (area) =>
-    handle(
-      supabase
-        .from("areas")
-        .insert([area])
-        .select()
-        .single()
-    ),
-
-  updateArea: async (id, updates) =>
-    handle(
-      supabase
-        .from("areas")
-        .update(updates)
-        .eq("id", id)
-        .select()
-        .single()
-    ),
-
-  deleteArea: async (id) =>
-    handle(
-      supabase
-        .from("areas")
-        .delete()
-        .eq("id", id)
-    ),
-
-  // =========================
-  // HOUSES
-  // =========================
-
-  getHouses: async () =>
-    handle(
-      supabase
-        .from("houses")
-        .select("*")
-        .order("created_at", { ascending: false })
-    ),
-
-  getHouse: async (id) =>
-    handle(
-      supabase
-        .from("houses")
-        .select("*")
-        .eq("id", id)
-        .single()
-    ),
-
-  getHousesByUser: async (userId) =>
-    handle(
-      supabase
-        .from("houses")
-        .select("*")
-        .eq("assigned_to", userId)
-        .order("created_at", { ascending: false })
-    ),
-
-  getHousesByArea: async (areaId) =>
-    handle(
-      supabase
-        .from("houses")
-        .select("*")
-        .eq("area_id", areaId)
-        .order("house_number")
-    ),
-
-  createHouse: async (house) =>
-    handle(
-      supabase
-        .from("houses")
-        .insert([house])
-        .select()
-        .single()
-    ),
-
-  updateHouse: async (id, updates) =>
-    handle(
-      supabase
-        .from("houses")
-        .update(updates)
-        .eq("id", id)
-        .select()
-        .single()
-    ),
-
-  deleteHouse: async (id) =>
-    handle(
-      supabase
-        .from("houses")
-        .delete()
-        .eq("id", id)
-    ),
-
-  // =========================
-  // BUSINESSES
-  // =========================
-
-  getBusinesses: async () =>
-    handle(
-      supabase
-        .from("businesses")
-        .select("*")
-        .order("created_at", { ascending: false })
-    ),
-
-  getBusiness: async (id) =>
-    handle(
-      supabase
-        .from("businesses")
-        .select("*")
-        .eq("id", id)
-        .single()
-    ),
-
-  getBusinessesByUser: async (userId) =>
-    handle(
-      supabase
-        .from("businesses")
-        .select("*")
-        .eq("assigned_to", userId)
-        .order("created_at", { ascending: false })
-    ),
-
-  getBusinessesByArea: async (areaId) =>
-    handle(
-      supabase
-        .from("businesses")
-        .select("*")
-        .eq("area_id", areaId)
-        .order("business_name")
-    ),
-
-  createBusiness: async (business) =>
-    handle(
-      supabase
-        .from("businesses")
-        .insert([business])
-        .select()
-        .single()
-    ),
-
-  updateBusiness: async (id, updates) =>
-    handle(
-      supabase
-        .from("businesses")
-        .update(updates)
-        .eq("id", id)
-        .select()
-        .single()
-    ),
-
-  deleteBusiness: async (id) =>
-    handle(
-      supabase
-        .from("businesses")
-        .delete()
-        .eq("id", id)
-    ),
-
-  // =========================
-  // FOLLOWUPS
-  // =========================
-
-  getFollowups: async () =>
-    handle(
-      supabase
-        .from("followups")
-        .select("*")
-        .order("due_date")
-    ),
-
-  createFollowup: async (followup) =>
-    handle(
-      supabase
-        .from("followups")
-        .insert([followup])
-        .select()
-        .single()
-    ),
-
-  updateFollowup: async (id, updates) =>
-    handle(
-      supabase
-        .from("followups")
-        .update(updates)
-        .eq("id", id)
-        .select()
-        .single()
-    ),
-
-  deleteFollowup: async (id) =>
-    handle(
-      supabase
-        .from("followups")
-        .delete()
-        .eq("id", id)
-    ),
-
-  // =========================
-  // DELIVERIES
-  // =========================
-
-  getDeliveries: async () =>
-    handle(
-      supabase
-        .from("deliveries")
-        .select("*")
-        .order("created_at", { ascending: false })
-    ),
-
-  createDelivery: async (delivery) =>
-    handle(
-      supabase
-        .from("deliveries")
-        .insert([delivery])
-        .select()
-        .single()
-    ),
-
-  updateDelivery: async (id, updates) =>
-    handle(
-      supabase
-        .from("deliveries")
-        .update(updates)
-        .eq("id", id)
-        .select()
-        .single()
-    ),
-
-  deleteDelivery: async (id) =>
-    handle(
-      supabase
-        .from("deliveries")
-        .delete()
-        .eq("id", id)
-    ),
+  // Deliveries
+  getDeliveries: (userId) => sb("GET", "deliveries", { query: `?postman_id=eq.${userId}&order=created_at.desc` }),
+  createDelivery: (data) => sb("POST", "deliveries", { body: data }),
+  updateDelivery: (id, data) => sb("PATCH", "deliveries", { body: data, query: `?id=eq.${id}` }),
 };
 
-export default db;
+export const isOnline = () => navigator.onLine;
