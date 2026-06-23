@@ -1075,6 +1075,317 @@ function SearchPage({ nav, theme, refresh, user }) {
   );
 }
 
+// ─── Scan Articles ────────────────────────────────────────────────────────────
+function ScanArticles({ nav, theme, user, toast, bump, refresh }) {
+  const [scanMode, setScanMode] = useState("input"); // input | manual | list
+  const [barcode, setBarcode] = useState("");
+  const [articles, setArticles] = useState([]);
+  const [scannedArticles, setScannedArticles] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [areas, setAreas] = useState([]);
+  const [selectedArticle, setSelectedArticle] = useState(null);
+  const videoRef = useRef(null);
+  const inputRef = useRef(null);
+
+  const today = new Date().toISOString().split("T")[0];
+
+  useEffect(() => {
+    const load = async () => {
+      const [a, arts] = await Promise.all([
+        db.getAreasByUser(user.id),
+        db.getArticles(),
+      ]);
+      setAreas(a || []);
+      // Filter today's scanned articles
+      const todayArticles = (arts || []).filter(art => art.created_at?.startsWith(today) && art.status === "scanned");
+      setArticles(todayArticles);
+      setScannedArticles(todayArticles);
+      setLoading(false);
+    };
+    load();
+  }, [refresh]);
+
+  const handleBarcodeSubmit = async () => {
+    if (!barcode.trim()) { toast("Enter a barcode", "error"); return; }
+    const article = articles.find(a => a.barcode === barcode.trim());
+    if (article) {
+      setSelectedArticle(article);
+      setScanMode("detail");
+      toast("Article found!");
+      setBarcode("");
+    } else {
+      toast(`Barcode not found: ${barcode}`, "error");
+      setBarcode("");
+    }
+    if (inputRef.current) inputRef.current.focus();
+  };
+
+  return (
+    <div style={{ padding: "16px 16px 100px" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+        <div>
+          <div style={{ fontSize: 22, fontWeight: 800, color: theme.primary }}>📱 Scan Articles</div>
+          <div style={{ fontSize: 12, color: theme.muted }}>Today's deliveries</div>
+        </div>
+      </div>
+
+      {scanMode === "input" && (
+        <>
+          <div style={{ background: theme.card, border: `1px solid ${theme.border}`, borderRadius: 14, padding: 16, marginBottom: 16 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: theme.muted, marginBottom: 10 }}>BARCODE SCANNER</div>
+            <input
+              ref={inputRef}
+              value={barcode}
+              onChange={e => setBarcode(e.target.value)}
+              onKeyPress={e => e.key === "Enter" && handleBarcodeSubmit()}
+              placeholder="Scan or enter barcode…"
+              autoFocus
+              style={{ width: "100%", padding: "12px", borderRadius: 10, border: `1px solid ${theme.border}`, background: theme.bg, color: theme.text, fontSize: 14, outline: "none", boxSizing: "border-box", marginBottom: 10 }}
+            />
+            <button onClick={handleBarcodeSubmit} style={{ width: "100%", padding: "12px", borderRadius: 10, background: theme.primary, color: "#fff", border: "none", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+              ✓ Search
+            </button>
+          </div>
+
+          <div style={{ marginBottom: 16 }}>
+            <SectionLabel theme={theme}>Today's Articles ({scannedArticles.length})</SectionLabel>
+            {loading ? <div style={{ textAlign: "center", color: theme.muted, padding: 20 }}>Loading…</div>
+              : scannedArticles.length === 0 ? <div style={{ textAlign: "center", color: theme.muted, fontSize: 13, padding: 20, background: theme.card, borderRadius: 12, border: `1px solid ${theme.border}` }}>No articles scanned today yet.</div>
+              : scannedArticles.map(art => (
+                <div key={art.id} onClick={() => { setSelectedArticle(art); setScanMode("detail"); }} style={{ background: theme.card, borderRadius: 12, padding: 14, border: `1px solid ${theme.border}`, marginBottom: 10, cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <div>
+                    <div style={{ fontWeight: 700, fontSize: 14, color: theme.text }}>{art.receiver_name || art.addressee_name || "Unknown"}</div>
+                    <div style={{ fontSize: 11, color: theme.muted, marginTop: 3 }}>📦 {art.barcode} • {art.article_type || "Item"}</div>
+                    <div style={{ fontSize: 11, color: art.status === "delivered" ? "#22c55e" : "#f97316", marginTop: 2, fontWeight: 600 }}>{art.status === "delivered" ? "✓ Delivered" : "Pending delivery"}</div>
+                  </div>
+                  <span style={{ fontSize: 18 }}>{art.status === "delivered" ? "✓" : "→"}</span>
+                </div>
+              ))}
+          </div>
+        </>
+      )}
+
+      {scanMode === "detail" && selectedArticle && (
+        <ArticleDeliveryForm article={selectedArticle} theme={theme} user={user} toast={toast} onBack={() => { setScanMode("input"); setSelectedArticle(null); bump(); }} nav={nav} />
+      )}
+    </div>
+  );
+}
+
+// ─── Article Delivery Form ────────────────────────────────────────────────────
+function ArticleDeliveryForm({ article, theme, user, toast, onBack, nav }) {
+  const [form, setForm] = useState({
+    status: "delivered", // delivered | returned | undeliverable
+    recipient_name: article.addressee_name || "",
+    recipient_mobile: article.addressee_mobile || "",
+    gps_lat: null,
+    gps_lng: null,
+    photo_url: null,
+    notes: "",
+  });
+  const [gpsLoading, setGpsLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  const captureGPS = () => {
+    if (!navigator.geolocation) { toast("GPS not supported", "error"); return; }
+    setGpsLoading(true);
+    navigator.geolocation.getCurrentPosition(
+      pos => { setForm(f => ({ ...f, gps_lat: pos.coords.latitude, gps_lng: pos.coords.longitude })); toast("GPS captured!"); setGpsLoading(false); },
+      err => { toast("GPS error: " + err.message, "error"); setGpsLoading(false); },
+      { enableHighAccuracy: true, timeout: 10000 }
+    );
+  };
+
+  const handlePhoto = e => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const r = new FileReader();
+    r.onloadend = () => { setForm(f => ({ ...f, photo_url: r.result })); toast("Photo captured!"); };
+    r.readAsDataURL(file);
+  };
+
+  const save = async () => {
+    setSaving(true);
+    const now = new Date().toISOString();
+    
+    // Update article status
+    await db.updateArticle(article.id, { 
+      status: form.status, 
+      delivered_at: form.status === "delivered" ? now : null,
+      delivery_lat: form.gps_lat,
+      delivery_lng: form.gps_lng,
+    });
+
+    // Create delivery proof
+    await db.createDeliveryProof({
+      article_id: article.id,
+      postman_id: user.id,
+      gps_lat: form.gps_lat,
+      gps_lng: form.gps_lng,
+      photo_url: form.photo_url,
+      recipient_name: form.recipient_name,
+      recipient_mobile: form.recipient_mobile,
+      delivered_at: now,
+    });
+
+    toast(`Article marked as ${form.status}!`);
+    setSaving(false);
+    onBack();
+  };
+
+  const f = k => e => setForm(p => ({ ...p, [k]: e.target.value }));
+
+  return (
+    <div>
+      <div style={{ background: theme.card, borderBottom: `1px solid ${theme.border}`, padding: "14px 16px", display: "flex", alignItems: "center", gap: 12, position: "sticky", top: 0, zIndex: 50 }}>
+        <button onClick={onBack} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 22 }}>←</button>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 15, fontWeight: 800, color: theme.text }}>{article.receiver_name || article.addressee_name || "Unknown"}</div>
+          <div style={{ fontSize: 11, color: theme.muted }}>📦 {article.barcode}</div>
+        </div>
+      </div>
+
+      <div style={{ padding: "16px", display: "flex", flexDirection: "column", gap: 14 }}>
+        <div style={{ background: theme.card, border: `1px solid ${theme.border}`, borderRadius: 12, padding: 14 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: theme.muted, marginBottom: 10 }}>DELIVERY STATUS</div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+            {["delivered", "returned", "undeliverable"].map(s => (
+              <button
+                key={s}
+                onClick={() => setForm(p => ({ ...p, status: s }))}
+                style={{
+                  padding: "10px 8px",
+                  borderRadius: 8,
+                  border: `2px solid ${form.status === s ? theme.primary : theme.border}`,
+                  background: form.status === s ? theme.primary + "18" : "transparent",
+                  color: form.status === s ? theme.primary : theme.muted,
+                  fontWeight: 600,
+                  fontSize: 12,
+                  cursor: "pointer",
+                  textTransform: "capitalize",
+                }}
+              >
+                {s === "delivered" ? "✓ Delivered" : s === "returned" ? "↩ Returned" : "✕ Undeliverable"}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <FormInput label="Recipient Name" value={form.recipient_name} onChange={f("recipient_name")} theme={theme} />
+        <FormInput label="Recipient Mobile" value={form.recipient_mobile} onChange={f("recipient_mobile")} theme={theme} type="tel" />
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+          <button onClick={captureGPS} style={{ padding: "16px 8px", borderRadius: 12, border: `1px solid ${form.gps_lat ? "#22c55e" : theme.border}`, background: theme.card, color: form.gps_lat ? "#22c55e" : theme.muted, cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", gap: 4, fontSize: 12, fontWeight: 600 }}>
+            {gpsLoading ? <span style={{ fontSize: 20 }}>⏳</span> : <span style={{ fontSize: 20 }}>📍</span>}
+            {form.gps_lat ? "GPS Set ✓" : "Capture GPS"}
+          </button>
+          <label style={{ padding: "16px 8px", borderRadius: 12, border: `1px solid ${form.photo_url ? "#22c55e" : theme.border}`, background: theme.card, color: form.photo_url ? "#22c55e" : theme.muted, cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", gap: 4, fontSize: 12, fontWeight: 600 }}>
+            <span style={{ fontSize: 20 }}>📷</span>{form.photo_url ? "Photo ✓" : "Take Photo"}
+            <input type="file" accept="image/*" capture="environment" style={{ display: "none" }} onChange={handlePhoto} />
+          </label>
+        </div>
+
+        <FormTextarea label="Delivery Notes" value={form.notes} onChange={f("notes")} theme={theme} />
+
+        <SaveBtn label={`Mark as ${form.status}`} color={form.status === "delivered" ? theme.success : theme.danger} onClick={save} saving={saving} />
+      </div>
+    </div>
+  );
+}
+
+// ─── Article Detail ───────────────────────────────────────────────────────────
+function ArticleDetail({ nav, theme, params, toast, bump, user }) {
+  const [article, setArticle] = useState(null);
+  const [proofs, setProofs] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    if (!params.id) return;
+    const load = async () => {
+      const arts = await db.getArticles();
+      const art = arts?.find(x => x.id === params.id);
+      setArticle(art || null);
+      if (art) {
+        const p = await db.getDeliveryProofs(art.id);
+        setProofs(p || []);
+      }
+      setLoading(false);
+    };
+    load();
+  }, [params.id]);
+
+  if (loading) return <div style={{ padding: 40, textAlign: "center", color: "#888" }}>Loading…</div>;
+  if (!article) return <div style={{ padding: 40, textAlign: "center", color: "#888" }}>Article not found</div>;
+
+  const latestProof = proofs?.[0];
+
+  return (
+    <div>
+      <div style={{ background: theme.card, borderBottom: `1px solid ${theme.border}`, padding: "14px 16px", display: "flex", alignItems: "center", gap: 12, position: "sticky", top: 0, zIndex: 50 }}>
+        <button onClick={() => nav("scan")} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 22 }}>←</button>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 17, fontWeight: 800, color: theme.text }}>📦 {article.barcode}</div>
+          <div style={{ fontSize: 11, color: theme.muted }}>Barcode tracking</div>
+        </div>
+      </div>
+
+      <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 12 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontSize: 24 }}>
+            {article.status === "delivered" ? "✓" : article.status === "returned" ? "↩" : "✕"}
+          </span>
+          <span
+            style={{
+              background:
+                article.status === "delivered" ? "#22c55e22" : article.status === "returned" ? "#f5970b22" : "#ef444422",
+              color: article.status === "delivered" ? "#22c55e" : article.status === "returned" ? "#f59e0b" : "#ef4444",
+              padding: "4px 12px",
+              borderRadius: 8,
+              fontSize: 12,
+              fontWeight: 700,
+              textTransform: "capitalize",
+            }}
+          >
+            {article.status || "pending"}
+          </span>
+        </div>
+
+        <InfoCard theme={theme}>
+          <InfoRow label="Barcode" value={article.barcode} theme={theme} />
+          <InfoRow label="Type" value={article.article_type || "—"} theme={theme} />
+          <InfoRow label="Sender" value={article.sender_name || "—"} theme={theme} />
+          <InfoRow label="Receiver" value={article.receiver_name || article.addressee_name || "—"} theme={theme} border={false} />
+        </InfoCard>
+
+        {article.address && (
+          <InfoCard theme={theme}>
+            <InfoRow label="Address" value={article.address} theme={theme} border={false} />
+          </InfoCard>
+        )}
+
+        {latestProof && (
+          <InfoCard theme={theme}>
+            <InfoRow label="Recipient Name" value={latestProof.recipient_name || "—"} theme={theme} />
+            <InfoRow label="Recipient Mobile" value={latestProof.recipient_mobile || "—"} theme={theme} />
+            {latestProof.gps_lat && latestProof.gps_lng && (
+              <InfoRow label="Delivery Location" value={`${latestProof.gps_lat?.toFixed(5)}, ${latestProof.gps_lng?.toFixed(5)}`} theme={theme} />
+            )}
+            <InfoRow label="Delivered At" value={new Date(latestProof.delivered_at).toLocaleString()} theme={theme} border={false} />
+          </InfoCard>
+        )}
+
+        {latestProof?.photo_url && (
+          <div style={{ borderRadius: 12, overflow: "hidden", border: `1px solid ${theme.border}` }}>
+            <img src={latestProof.photo_url} alt="Delivery proof" style={{ width: "100%", display: "block" }} />
+          </div>
+        )}
+
+        <div style={{ fontSize: 11, color: theme.muted, textAlign: "center" }}>Scanned {new Date(article.created_at).toLocaleDateString()}</div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Reports Page ─────────────────────────────────────────────────────────────
 function ReportsPage({ nav, theme, refresh, user }) {
   const [areas, setAreas] = useState([]);
