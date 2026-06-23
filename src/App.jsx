@@ -848,8 +848,7 @@ function MapPage({ nav, theme, refresh, user, toast, bump }) {
           </div>
         )}
       </div>
-      <div style={{height:64,flexShrink:0,background:theme.card}}/>
-    </div>
+     
   );
 }
 
