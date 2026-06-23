@@ -819,7 +819,7 @@ function MapPage({ nav, theme, refresh, user, toast, bump }) {
           </>
         ) : (
           <>
-            <div style={{fontSize:20}}>🗺️</div>
+            <button onClick={()=>nav("dashboard")} style={{background:"none",border:"none",cursor:"pointer",fontSize:22,padding:"0 4px"}}>←</button>
             <div style={{flex:1}}>
               <div style={{fontWeight:800,fontSize:15,color:theme.text}}>Beat Map</div>
               <div style={{fontSize:11,color:theme.muted}}>{editMode?"Drag to reposition":"Tap area to see houses"}</div>
