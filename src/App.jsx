@@ -684,6 +684,8 @@ function AreasPage({ nav, theme, user, toast, bump, refresh, canEdit }) {
   const [showAdd, setShowAdd] = useState(false);
   const [form, setForm] = useState({ name:"", office_name: user.office_name||"" });
   const [saving, setSaving] = useState(false);
+  const [editingId, setEditingId] = useState(null);
+  const [editName, setEditName] = useState("");
 
   useEffect(() => {
     Promise.all([db.getAreas(), db.getUsers(), db.getHouses()]).then(([a,u,h])=>{ setAreas(a||[]); setUsers(u||[]); setHouses(h||[]); });
@@ -692,10 +694,19 @@ function AreasPage({ nav, theme, user, toast, bump, refresh, canEdit }) {
   const addArea = async () => {
     if (!form.name) { toast("Area name required","error"); return; }
     setSaving(true);
-    const res = await db.createArea(form);
-    if (res) { toast("Area created!"); bump(); setShowAdd(false); setForm({name:"",office_name:user.office_name||""}); }
-    else toast("Error","error");
+    // Create with map center coords so pin appears immediately
+    const res = await db.createArea({ ...form, lat: 22.015, lng: 85.196 });
+    if (res) {
+      toast("Area created! Go to Map → ✥ Move to position it.");
+      bump(); setShowAdd(false); setForm({name:"",office_name:user.office_name||""});
+    } else toast("Error","error");
     setSaving(false);
+  };
+
+  const saveEditName = async (area) => {
+    if (!editName.trim()) { toast("Name cannot be empty","error"); return; }
+    await db.updateArea(area.id, { name: editName.trim() });
+    toast("Area renamed!"); bump(); setEditingId(null);
   };
 
   const filtered = areas.filter(a=>a.name.toLowerCase().includes(search.toLowerCase()));
@@ -713,7 +724,8 @@ function AreasPage({ nav, theme, user, toast, bump, refresh, canEdit }) {
       {showAdd && canEdit && (
         <div style={{background:theme.card,border:`1px solid ${theme.border}`,borderRadius:14,padding:16,marginBottom:16}}>
           <FormInput label="Area Name *" value={form.name} onChange={e=>setForm(p=>({...p,name:e.target.value}))} theme={theme} />
-          <div style={{marginTop:10}}>
+          <div style={{fontSize:11,color:theme.muted,marginTop:8,marginBottom:4}}>💡 After creating, go to Map → ✥ Move to drag the pin to the correct location.</div>
+          <div style={{marginTop:8}}>
             <SaveBtn label="Create Area" color={theme.primary} onClick={addArea} saving={saving} />
           </div>
         </div>
@@ -725,19 +737,44 @@ function AreasPage({ nav, theme, user, toast, bump, refresh, canEdit }) {
         {filtered.map(area=>{
           const assignedUser = users.find(u=>u.id===area.assigned_to);
           const hCount = houses.filter(h=>h.area_id===area.id).length;
+          const isEditing = editingId === area.id;
           return (
             <div key={area.id} style={{background:theme.card,borderRadius:12,padding:14,border:`1px solid ${theme.border}`}}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:6}}>
-                <div style={{fontWeight:700,fontSize:14,color:theme.text}}>{area.name}</div>
-                {canEdit && <button onClick={async()=>{ if(confirm("Delete area?")) { await db.deleteArea(area.id); bump(); }}} style={{background:"none",border:"none",cursor:"pointer",fontSize:16,color:theme.danger}}>🗑️</button>}
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:6,gap:8}}>
+                {isEditing ? (
+                  <div style={{flex:1,display:"flex",gap:8}}>
+                    <input value={editName} onChange={e=>setEditName(e.target.value)} autoFocus
+                      style={{flex:1,padding:"6px 10px",borderRadius:8,border:`1px solid ${theme.primary}`,background:theme.bg,color:theme.text,fontSize:14,outline:"none"}} />
+                    <button onClick={()=>saveEditName(area)} style={{background:theme.primary,color:"#fff",border:"none",borderRadius:8,padding:"6px 12px",fontSize:12,fontWeight:700,cursor:"pointer"}}>Save</button>
+                    <button onClick={()=>setEditingId(null)} style={{background:"none",border:`1px solid ${theme.border}`,borderRadius:8,padding:"6px 10px",fontSize:12,color:theme.muted,cursor:"pointer"}}>✕</button>
+                  </div>
+                ) : (
+                  <div style={{fontWeight:700,fontSize:14,color:theme.text,flex:1}}>{area.name}</div>
+                )}
+                {canEdit && !isEditing && (
+                  <div style={{display:"flex",gap:6}}>
+                    <button onClick={()=>{setEditingId(area.id);setEditName(area.name);}} style={{background:"none",border:`1px solid ${theme.border}`,borderRadius:8,padding:"4px 8px",fontSize:12,color:theme.primary,cursor:"pointer"}}>✏️</button>
+                    <button onClick={async()=>{ if(confirm("Delete area?")) { await db.deleteArea(area.id); bump(); }}} style={{background:"none",border:"none",cursor:"pointer",fontSize:16,color:theme.danger}}>🗑️</button>
+                  </div>
+                )}
               </div>
               <div style={{fontSize:12,color:theme.muted,marginBottom:4}}>🏠 {hCount} houses surveyed</div>
               <div style={{fontSize:12,color:assignedUser?theme.primary:theme.muted}}>
                 👷 {assignedUser ? assignedUser.name : "Unassigned"}
               </div>
+              {area.lat ? (
+                <div style={{fontSize:11,color:"#22c55e",marginTop:4}}>📍 Map position set</div>
+              ) : (
+                <div style={{fontSize:11,color:theme.accent,marginTop:4}}>⚠ No map position — go to Map → ✥ Move</div>
+              )}
             </div>
           );
         })}
+        {filtered.length === 0 && !showAdd && (
+          <div style={{textAlign:"center",color:theme.muted,fontSize:13,padding:32,background:theme.card,borderRadius:12,border:`1px solid ${theme.border}`}}>
+            No areas yet. Tap + to create your first beat area.
+          </div>
+        )}
       </div>
     </div>
   );
